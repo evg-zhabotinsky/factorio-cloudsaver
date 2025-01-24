@@ -9,6 +9,27 @@ $pythonDir = Join-Path $scriptDir "python"
 $pythonExe = Join-Path $pythonDir "python.exe"
 $pythonZip = Join-Path $scriptDir "python.zip"
 
+# Function to check if a Python executable supports f-strings
+function Test-PythonFStringSupport {
+    param (
+        [string]$PythonCommand
+    )
+    try {
+        $ProcessInfo = Start-Process -FilePath $PythonCommand -ArgumentList "-c", "f''" -NoNewWindow -PassThru -Wait -ErrorAction Stop
+        return $true
+    } catch {
+        return $false
+    }
+}
+# Check if a valid Python is already available on PATH
+$PythonAvailable = $false
+if (Test-PythonFStringSupport "python3") {
+    $PythonCommand = "python3"
+    $PythonAvailable = $true
+} elseif (Test-PythonFStringSupport "python") {
+    $PythonCommand = "python"
+    $PythonAvailable = $true
+}
 # Check if python3 is available in the PATH
 $pythonInPath = Get-Command python3 -ErrorAction SilentlyContinue
 if ($pythonInPath) {
