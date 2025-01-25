@@ -42,4 +42,5 @@ if os.path.exists(fragdir):
     input()
     exit()
 
+print(gamecmd)
 print(os.listdir(ourdir))
