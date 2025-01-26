@@ -1,9 +1,14 @@
-# "Embedded" python distro goes here
-/python
 # Save file directories
-/saves
-/fragref
-/fragments
+/saves/
+/fragref/
+/fragments/
+
+# "Embedded" python distro goes here
+/python/
+/python-*.zip
+
+# IDE
+/.vscode/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
