@@ -15,10 +15,10 @@ sizequant = 1 * 1024**2  # 1MB
 maxsize //= sizequant
 
 # Autosave management
-sync_daily = 7
+sync_daily = 10
 keep_daily = 30
-keep_hourly = 24
-keep_last = 20
+keep_hourly = 30
+keep_last = 30
 
 poll_interval = .5  # seconds -- Game still running check interval
 scan_interval = 10  # seconds -- Native save directory polling interval
