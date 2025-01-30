@@ -12,6 +12,7 @@
 
 # "Release" zip
 /factorio-cloudsaver.zip
+/factorio-cloudsaver/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
