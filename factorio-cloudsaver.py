@@ -14,6 +14,12 @@ sizequant = 1 * 1024^2  # 1MB
 # Recompute
 maxsize //= sizequant
 
+# Autosave management
+sync_daily = 7
+keep_daily = 30
+keep_hourly = 24
+keep_last = 20
+
 poll_interval = .5  # seconds -- Game still running check interval
 scan_interval = 10  # seconds -- Native save directory polling interval
 
@@ -40,13 +46,6 @@ print(f'Our directory: {ourdir}\n'
     f'Game working directory: {os.getcwd()}\n'
     f'Game command and arguments: {repr(gamecmd)}\n')
 
-# Create needed directories
-for i in (nativedir, savedir):
-    try:
-        os.mkdir(i)
-    except FileExistsError:
-        pass
-
 if os.path.exists(fragdir):
     print(f'This directory exists:\n'
         f'{fragdir}\n'
@@ -66,52 +65,200 @@ if os.path.exists(fragdir):
     input()
     exit()
 
+extstr = '.zip'
+autostr = '_autosave'
+fragstr = 'save_fragment_'
+lastfragstr = 'last_save_fragment_'
+
+def fragnames(name, n):
+    if n <= 1:
+        return name
+    return [f'{name}.{lastfragstr if i == n else fragstr}{i}' for i in range(1, n + 1)]
+
+def savename(fullname:str):
+    if fullname.endswith(extstr):
+        return fullname[:-len(extstr)]
+    return None
+
+def parsefrag(basename:str):  # => (name, partcount)
+    p = basename.rsplit('.', 1)
+    if len(p) == 1:
+        return (basename, 1)
+    if p[1].startswith(fragstr):
+        if not p[1][len(fragstr):].isdigit:
+            return (basename, 1)
+        return (None, None)  # Ignore non-last parts here
+    if p[1].startswith(lastfragstr):
+        n = p[1][len(lastfragstr):]
+        if not n.isdigit:
+            return (basename, 1)
+        return (p[0], int(n))
+
+def findsaves(nameset:set):
+    res = dict()
+    for i in nameset:
+        name, parts = parsefrag(i)
+        if name is None:
+            continue
+        if name in res and res[name] < parts:
+            continue
+        res[name] = parts
+    for i, j in list(res.items()):
+        if not nameset.issuperset(fragnames(j, i)):
+            del res[i]
+    return res
+
+def trydel(name, dir=nativedir):
+    path = os.path.join(dir, name + extstr)
+    try:
+        os.remove(path)
+    except:
+        print(f'Failed to remove: {path}')
+
+def delfrag(name, n):
+    for i in fragnames(name, n):
+        trydel(i, fragdir)
+
+def prunesaves(saves:dict, nameset:set, dir):
+    for i in nameset.difference(i for name, n in saves.items()
+                                  for i in fragnames(name, n)):
+        trydel(i, dir)
+
+def dirsaves(dir):
+    nameset = set(savename(i) for i in os.listdir(dir))
+    nameset.discard(None)
+    return nameset
+
+def prepdir(dir):
+    nameset = dirsaves(dir)
+    saves = findsaves(nameset)
+    prunesaves(saves, nameset, dir)
+    return saves
+
+def readsave(name, dir=nativedir):
+    with open(os.path.join(dir, name + extstr), 'rb') as f:
+        return f.read()
+
+def writesave(data, name, dir=nativedir):
+    with open(os.path.join(dir, name + extstr), 'wb') as f:
+        return f.write(data)
+
+def readfragsave(name, n):
+    data = b''
+    for i in fragnames(name, n):
+        data += readsave(i, fragdir)
+    return data
+
+def writefragsave(data, name):
+    sz = (len(data) + sizequant - 1) // sizequant
+    if sz <= maxsize:
+        writesave(data, name, fragdir)
+        return 1
+    n = (sz + maxsize - 1) // maxsize
+    sz = (sz + n - 1) // n * sizequant
+    n = (len(data) + sz - 1) // sz
+    p = 0
+    for i in fragnames(name, n):
+        t = p + sz
+        writesave(data[p:t], i, fragdir)
+        p = t
+    return n
+
+def scansaves():
+    res = dict()
+    for i in os.scandir(nativedir):
+        name = savename(i.name)
+        if name is None:
+            continue
+        st = i.stat()
+        res[name] = (st.st_size, st.st_mtime)
+    return res
+
+def handle_autosaves(stamps:dict):
+    # Rename default-named autosaves
+    for name, (sz, ts) in stamps.items():
+        if name[len(autostr):].isdigit():
+            newname = f'{autostr}_{time.strftime('%Y-%m-%d_%H-%M-%S%Z', time.localtime(ts))}'
+            os.replace(os.path.join(nativedir, name + extstr),
+                       os.path.join(nativedir, newname + extstr))
+            stamps[newname] = stamps[name]
+            del stamps[name]
+    # Prune old autosaves
+    daily = dict()
+    hourly = dict()
+    names = sorted(stamps.keys())
+    for i in names:
+        j = i.rsplit('-', 2)[0]
+        hourly[j] = i
+        j = j.rsplit('_', 1)[0]
+        daily[j] = i
+    names = names[-keep_last:]
+    names = sorted(set(hourly.values()).difference(names))[-keep_hourly:] + names
+    names = sorted(set(daily.values()).difference(names))[-keep_daily:] + names
+    # Only return autosaves to be synced
+    res = dict()
+    for i in sorted(daily.values())[-1 - sync_daily : -1]:
+        res[i] = stamps[i]
+    return res
+
 save_stamps = dict()
+def prepare():
+    savedir_saves = prepdir(nativedir)
+    fragdir_saves = prepdir(fragdir)
+    # Move fragments from savedir and prune deleted saves
+    for name, n in savedir_saves.items():
+        if n == 1:
+            if name not in fragdir_saves:
+                trydel(name)
+            continue
+        if name in fragdir_saves:
+            continue
+        for i in fragnames(name, n):
+            j = i + extstr
+            try:
+                os.rename(os.path.join(nativedir, j), os.path.join(fragdir, j))
+            except:
+                print('Failed to move {j} from savedir to fragdir')
+                trydel(i)
+    savedir_saves = scansaves()
+    save_stamps.clear()
+    for name, n in fragdir_saves.items():
+        data = readfragsave(name, n)
+        if name in savedir_saves and data == readsave(name):
+            ts = savedir_saves[name][1]
+        else:
+            writesave(data, name)
+            ts = os.path.getmtime(os.path.join(nativedir, name + extstr))
+        save_stamps[name] = (n, len(data), ts)
+
 def scan_updates():
     print('Scanning save folder for modifications...')
-    found = set()
-    for entry in os.scandir(nativedir):
-        if not entry.name.endswith('.zip'):
-            continue
-        if entry.name.startswith('_autosave'):
-            continue
-        found.add(entry.name)
-        st = entry.stat()
-        if entry.name in save_stamps and save_stamps[entry.name] == (st.st_size, st.st_mtime):
-            continue
-        p = os.path.join(fragdir, entry.name.rsplit('.', 1)[0])
-        if entry.name in save_stamps:
-            n = save_stamps[entry.name][0]
-            if n == 1:
-                n = [f'{p}.zip']
-            else:
-                n = [f'{p}.firstof.{n}.zip'] + [f'{p}.partidx.{i}.zip' for i in range(2, n + 1)]
-                for i in n:
-                    try:
-                        os.remove(i)
-                    except:
-                        print('Failed to remove stale fragment: {i}')
-        with open(entry.path, 'rb') as f:
-            data = f.read()
-        sz = (len(data) + sizequant - 1) // sizequant
-        if sz <= maxsize:
-            with open(f'{p}.zip', 'wb') as f:
-                f.write(data)
-        else:
-            n = (sz + maxsize - 1) // maxsize
-            sz = (sz + n - 1) // n * sizequant
-            n = (len(data) + sz - 1) // sz
-            with open(f'{p}.firstof.{n}.zip', 'wb') as f:
-                f.write(data[:sz])
-            for i in range(2, n):
-                with open(f'{p}.partidx.{i}.zip', 'wb') as f:
-                    f.write(data[sz*(i-1): sz*i])
-            with open(f'{p}.partidx.{n}.zip', 'wb') as f:
-                f.write(data[sz*(n-1):])
-        save_stamps[entry.name] = (n, len(data), st.st_mtime)
-
+    new_stamps = scansaves()
+    # Handle autosaves
+    autosaves = {name: v for name, v in new_stamps.items() if name.startswith(autostr)}
+    for name in autosaves.keys():
+        del new_stamps[name]
+    new_stamps.update(handle_autosaves(autosaves))
+    # Prune removed saves
+    for name in set(save_stamps.keys()).difference(new_stamps.keys()):
+        delfrag(name, save_stamps[fragnames][0])
+        del save_stamps[name]
+    # Sync new saves
+    for name, (sz, ts) in new_stamps.items():
+        if name in save_stamps:
+            if save_stamps[name][1:] == (sz, ts):
+                continue
+            delfrag(name, save_stamps[name][0])
+        n = writefragsave(readsave(name), name)
+        save_stamps[name] = (n, sz, ts)
     print('Save scan done')
 
+# Create needed directories
+for i in (nativedir, savedir):
+    try:
+        os.mkdir(i)
+    except FileExistsError:
+        pass
 # Move dirs into place
 os.rename(nativedir, fragdir)
 os.rename(savedir, nativedir)
@@ -121,137 +268,7 @@ try:
     game = subprocess.Popen(gamecmd)
     print('Game started. While it loads, preparing the saves...')
 
-    # Move fragments out of savedir
-    frags = []
-    for entry in os.scandir(nativedir):
-        if not entry.name.endswith('.zip'):
-            continue
-        if entry.name.startswith('_autosave'):
-            continue
-        p = entry.name.rsplit('.', 3)
-        if len(p) < 4 or not p[2].isdigit or p[1] not in ('firstof', 'partidx'):
-            continue
-        frags.append(entry.name)
-    for i in frags:
-        t = os.path.join(fragdir, i)
-        if os.path.exists(t):
-            continue
-        try:
-            os.rename(os.path.join(nativedir, i), t)
-        except:
-            print('Failed to move from saves to frags: {i}')
-    # Index the fragments
-    frag_n = dict()
-    autosaves = []
-    frags = []
-    for entry in os.scandir(fragdir):
-        if not entry.name.endswith('.zip'):
-            continue
-        if entry.name.startswith('_autosave'):
-            autosaves.append(entry.path)
-            continue
-        p = entry.name.rsplit('.', 3)
-        if len(p) < 4 or not p[2].isdigit or p[1] not in ('firstof', 'partidx'):
-            frag_n[entry.name.rsplit('.', 1)[0]] = 1
-            continue
-        j = int(p[2])
-        if p[1] == 'firstof' and j > 1:
-            frag_n[p[0]] = j
-        elif p[1] == 'partnum' and j > 0:
-            frags.append((p[0], j))
-        else:
-            frags.append((p[0], 0))
-    # Prune dangling fragments
-    for i, j in frags:
-        if j <= 0 or i not in frag_n or frag_n[i] < j:
-            p = os.path.join(fragdir, f'{i}.partnum.{j}.zip')
-            try:
-                os.remove(p)
-            except:
-                print('Failed to remove dangling fragment: {p}')
-    del frags
-    # Move autosaves out of fragdir
-    for i in autosaves:
-        try:
-            os.replace(os.path.join(fragdir, i), os.path.join(nativedir, i))
-        except:
-            print('Failed to move from frags to saves: {i}')
-    del autosaves
-    # Prune removed saves from savedir
-    stale = []
-    for entry in os.scandir(nativedir):
-        if not entry.name.endswith('.zip'):
-            continue
-        if entry.name.startswith('_autosave'):
-            continue
-        if entry.name.rsplit('.', 1)[0] not in frag_n:
-            stale.append(entry.path)
-    del frag_n
-    for i in stale:
-        try:
-            os.remove(i)
-        except:
-            print('Failed to remove stale save: {i}')
-    del stale
-    # Make savedir contents match fragdir
-    save_stamps = dict()
-    borked = []
-    for entry in os.scandir(fragdir):
-        if not entry.name.endswith('.zip'):
-            continue
-        p = entry.name.rsplit('.', 3)
-        if len(p) < 4 or not p[2].isdigit or p[1] not in ('firstof', 'partidx'):
-            with open(entry.path, 'rb') as f:
-                data = f.read()
-            p = entry.name
-            n = 1
-        elif p[1] != 'firstof':
-            continue
-        else:
-            n = int(p[2])
-            with open(entry.path, 'rb') as f:
-                data = f.read()
-            for i in range(2, n + 1):
-                t = os.path.join(fragdir, f'{p[0]}.partidx.{i}.zip')
-                if os.path.exists(t):
-                    with open(t, 'rb') as f:
-                        data += f.read()
-                else:
-                    data = None
-                    break
-            if data is None:
-                borked.append(entry.path)
-                for i in range(2, n + 1):
-                    t = os.path.join(fragdir, f'{p[0]}.partidx.{i}.zip')
-                    if os.path.exists(t):
-                        borked.append(t)
-                continue
-            p = f'{p[0]}.zip'
-        p = os.path.join(nativedir, p)
-        st = os.stat(p)
-        upd = True
-        if st.st_size == len(data):
-            upd = False
-        else:
-            try:
-                with open(p, 'rb') as f:
-                    if f.read() == data:
-                        upd = False
-            except:
-                pass
-        if upd:
-            with open(p, 'wb') as f:
-                f.write(data)
-            save_stamps[p] = (n, len(data), os.path.getmtime(p))
-        else:
-            save_stamps[p] = (n, st.st_size, st.st_mtime)
-    del data
-    for i in borked:
-        try:
-            os.remove(i)
-        except:
-            print('Failed to remove borked save fragment: {i}')
-    del borked
+    prepare()
     print('Game saves prepare done.')
 
     next_scan = time.monotonic()
