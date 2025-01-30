@@ -76,7 +76,7 @@ def fragnames(name, n):
     return [f'{name}.{lastfragstr if i == n else fragstr}{i}' for i in range(1, n + 1)]
 
 def savename(fullname:str):
-    if fullname.endswith(extstr):
+    if fullname.endswith(extstr) and fullname != 'factorio-cloudsaver.zip':
         return fullname[:-len(extstr)]
     return None
 
