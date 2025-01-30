@@ -8,9 +8,9 @@ import time
 import subprocess
 
 # Maximum file size for Steam Cloud:
-maxsize = 100 * 1024^2  # 100MB
+maxsize = 100 * 1024**2  # 100MB
 # Round size up to this (must be a divisor of the above):
-sizequant = 1 * 1024^2  # 1MB
+sizequant = 1 * 1024**2  # 1MB
 # Recompute
 maxsize //= sizequant
 
@@ -72,7 +72,7 @@ lastfragstr = 'last_save_fragment_'
 
 def fragnames(name, n):
     if n <= 1:
-        return name
+        return [name]
     return [f'{name}.{lastfragstr if i == n else fragstr}{i}' for i in range(1, n + 1)]
 
 def savename(fullname:str):
@@ -104,7 +104,7 @@ def findsaves(nameset:set):
             continue
         res[name] = parts
     for i, j in list(res.items()):
-        if not nameset.issuperset(fragnames(j, i)):
+        if not nameset.issuperset(fragnames(i, j)):
             del res[i]
     return res
 
@@ -139,9 +139,11 @@ def readsave(name, dir=nativedir):
     with open(os.path.join(dir, name + extstr), 'rb') as f:
         return f.read()
 
-def writesave(data, name, dir=nativedir):
-    with open(os.path.join(dir, name + extstr), 'wb') as f:
-        return f.write(data)
+def writesave(data, ts, name, dir=nativedir):
+    path = os.path.join(dir, name + extstr)
+    with open(path, 'wb') as f:
+        f.write(data)
+    os.utime(path, (ts, ts))
 
 def readfragsave(name, n):
     data = b''
@@ -149,10 +151,10 @@ def readfragsave(name, n):
         data += readsave(i, fragdir)
     return data
 
-def writefragsave(data, name):
+def writefragsave(data, ts, name):
     sz = (len(data) + sizequant - 1) // sizequant
     if sz <= maxsize:
-        writesave(data, name, fragdir)
+        writesave(data, ts, name, fragdir)
         return 1
     n = (sz + maxsize - 1) // maxsize
     sz = (sz + n - 1) // n * sizequant
@@ -160,7 +162,7 @@ def writefragsave(data, name):
     p = 0
     for i in fragnames(name, n):
         t = p + sz
-        writesave(data[p:t], i, fragdir)
+        writesave(data[p:t], ts, i, fragdir)
         p = t
     return n
 
@@ -176,9 +178,11 @@ def scansaves():
 
 def handle_autosaves(stamps:dict):
     # Rename default-named autosaves
-    for name, (sz, ts) in stamps.items():
+    for name, (sz, ts) in sorted(stamps.items()):
         if name[len(autostr):].isdigit():
-            newname = f'{autostr}_{time.strftime('%Y-%m-%d_%H-%M-%S%Z', time.localtime(ts))}'
+            tz = time.strftime('%z', time.localtime(ts))
+            tz = f'{"PM"[tz[0]=="-"]}{tz[-4:]}'
+            newname = f'{autostr}_{time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(ts))}{tz}'
             os.replace(os.path.join(nativedir, name + extstr),
                        os.path.join(nativedir, newname + extstr))
             stamps[newname] = stamps[name]
@@ -196,8 +200,11 @@ def handle_autosaves(stamps:dict):
     names = sorted(set(hourly.values()).difference(names))[-keep_hourly:] + names
     names = sorted(set(daily.values()).difference(names))[-keep_daily:] + names
     # Only return autosaves to be synced
+    today = f'{autostr}_{time.strftime("%Y-%m-%d", time.localtime(time.time()))}'
+    if today in daily:
+        del daily[today]
     res = dict()
-    for i in sorted(daily.values())[-1 - sync_daily : -1]:
+    for i in sorted(daily.values())[-sync_daily:]:
         res[i] = stamps[i]
     return res
 
@@ -205,10 +212,10 @@ save_stamps = dict()
 def prepare():
     savedir_saves = prepdir(nativedir)
     fragdir_saves = prepdir(fragdir)
-    # Move fragments from savedir and prune deleted saves
+    # Move fragments from savedir and prune deleted non-auto-saves
     for name, n in savedir_saves.items():
         if n == 1:
-            if name not in fragdir_saves:
+            if name not in fragdir_saves and not name.startswith(autostr):
                 trydel(name)
             continue
         if name in fragdir_saves:
@@ -227,8 +234,8 @@ def prepare():
         if name in savedir_saves and data == readsave(name):
             ts = savedir_saves[name][1]
         else:
-            writesave(data, name)
-            ts = os.path.getmtime(os.path.join(nativedir, name + extstr))
+            ts = os.path.getmtime(os.path.join(fragdir, fragnames(name, n)[-1] + extstr))
+            writesave(data, ts, name)
         save_stamps[name] = (n, len(data), ts)
 
 def scan_updates():
@@ -241,7 +248,7 @@ def scan_updates():
     new_stamps.update(handle_autosaves(autosaves))
     # Prune removed saves
     for name in set(save_stamps.keys()).difference(new_stamps.keys()):
-        delfrag(name, save_stamps[fragnames][0])
+        delfrag(name, save_stamps[name][0])
         del save_stamps[name]
     # Sync new saves
     for name, (sz, ts) in new_stamps.items():
@@ -249,7 +256,7 @@ def scan_updates():
             if save_stamps[name][1:] == (sz, ts):
                 continue
             delfrag(name, save_stamps[name][0])
-        n = writefragsave(readsave(name), name)
+        n = writefragsave(readsave(name), ts, name)
         save_stamps[name] = (n, sz, ts)
     print('Save scan done')
 
@@ -291,6 +298,10 @@ except:
             game.wait(timeout = 5)
         except:
             pass
+    # Move dirs back where they were
+    os.rename(nativedir, savedir)
+    os.rename(fragdir, nativedir)
+    raise
 
 # Move dirs back where they were
 os.rename(nativedir, savedir)
